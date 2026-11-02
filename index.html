@@ -1,0 +1,1061 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>4A 班問答大賽</title>
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;600;700;900&display=swap');
+    body { font-family: 'Noto Sans TC', -apple-system, BlinkMacSystemFont, sans-serif; }
+  </style>
+</head>
+<body class="bg-slate-100 min-h-screen text-slate-800">
+  <div id="app">
+    <div class="flex items-center justify-center min-h-screen">
+      <div class="text-center">
+        <div class="text-4xl mb-3 animate-spin">🚀</div>
+        <p class="text-slate-600 font-bold">4A 班問答大賽系統載入中...</p>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    window.onerror = function(msg, url, line) {
+      console.error("系統提醒:", msg, "Line:", line);
+    };
+
+    const DEFAULT_BANK = [
+      {
+        id: 'q_rock_1',
+        type: 'drag',
+        title: '請根據岩石形成的過程，在正確位置填上岩石名稱：',
+        customImageUrl: 'https://images.unsplash.com/photo-1518709268805-4e9042af9f23?w=800',
+        blankCount: 3,
+        options: ['火成岩', '變質岩', '沉積岩'],
+        correctAnswer: { b1: '火成岩', b2: '變質岩', b3: '沉積岩' },
+        explanation: '① 火成岩：岩漿冷卻凝固形成；② 變質岩：在高溫高壓下變質而成；③ 沉積岩：被水沖下的土壤沉積而成。'
+      },
+      {
+        id: 'q_discussion_1',
+        type: 'discussion',
+        title: '課堂討論：為什麼夏天冰鎮飲料瓶的外壁會出現小水珠？請各組觀察並討論原因。',
+        customImageUrl: 'https://images.unsplash.com/photo-1551024709-8f23befc6f87?w=600',
+        explanation: '引導重點：空氣中的水蒸氣遇到冰冷的瓶壁，受冷凝結成液態的小水珠（凝結現象）。'
+      },
+      {
+        id: 'q_mc_2',
+        type: 'mc',
+        title: '地球繞著什麼轉動，從而產生了日與夜的交替現象？',
+        customImageUrl: '',
+        options: ['地軸', '赤道', '地核', '軌道'],
+        correctAnswer: 0,
+        explanation: '標準答案：(A) 地軸。地球繞著地軸自轉，導致面向太陽一面為白天，背向太陽一面為夜晚。'
+      },
+      {
+        id: 'q_boil_3',
+        type: 'numeric',
+        title: '在大氣壓下，水沸騰的標準溫度是多少攝氏度（℃）？',
+        customImageUrl: 'https://images.unsplash.com/photo-1544717305-2782549b5136?w=600',
+        correctAnswer: '100',
+        unit: '°C',
+        explanation: '標準大氣壓下，水的沸點為 100°C。'
+      }
+    ];
+
+    const urlParams = new URLSearchParams(window.location.search);
+    const roomParam = urlParams.get('room');
+    const isStudentOnly = window.location.search.includes('mode=student') || window.location.hash.includes('student');
+    
+    let state = {
+      appMode: isStudentOnly ? 'student' : 'teacher',
+      studentSeat: null,
+      teacherTab: 'monitor',
+      showQrModal: false,
+      activeQuestion: null,
+      showAnswer: false,
+      studentAnswers: {},
+      questionBank: loadBank(),
+      studentDragSelections: {},
+      studentNumericInput: '',
+      studentMcChoice: null,
+      hasSubmittedCurrentQ: false,
+      isSubmitting: false,
+      newQType: 'drag',
+      qBlankCount: 3,
+      qCustomUrl: '',
+      editingQId: null,
+      roomCode: roomParam || '4A2026',
+      syncStatusText: '🟢 防快取連線中',
+      lastQTime: '',
+      noticeMessage: '',
+      noticeType: ''
+    };
+
+    function loadBank() {
+      try {
+        const saved = localStorage.getItem('4a_quiz_bank_v17');
+        return saved ? JSON.parse(saved) : DEFAULT_BANK;
+      } catch(e) { return DEFAULT_BANK; }
+    }
+
+    function saveBank() {
+      try { localStorage.setItem('4a_quiz_bank_v17', JSON.stringify(state.questionBank)); } catch(e) {}
+    }
+
+    let syncInterval = null;
+
+    function initCloudSync() {
+      try {
+        if (typeof BroadcastChannel !== 'undefined') {
+          const bc = new BroadcastChannel(`4a_bc_${state.roomCode}`);
+          bc.onmessage = (e) => handleSyncMessage(e.data);
+        }
+      } catch(e){}
+
+      if (syncInterval) clearInterval(syncInterval);
+      syncInterval = setInterval(fetchLatestSyncData, 1800);
+      fetchLatestSyncData();
+    }
+
+    async function publishRoomState(question, showAnswer) {
+      let lightQ = null;
+      if (question) {
+        lightQ = { ...question };
+        if (lightQ.customImageUrl && lightQ.customImageUrl.startsWith('data:image')) {
+          lightQ.customImageUrl = ''; 
+        }
+      }
+
+      const statePayload = {
+        type: 'ROOM_STATE',
+        question: lightQ,
+        showAnswer: showAnswer,
+        timestamp: Date.now(),
+        timeStr: new Date().toLocaleTimeString()
+      };
+
+      try {
+        if (typeof BroadcastChannel !== 'undefined') {
+          new BroadcastChannel(`4a_bc_${state.roomCode}`).postMessage(statePayload);
+        }
+      } catch(e){}
+
+      try {
+        await fetch(`https://ntfy.sh/4a_quiz_state_${state.roomCode}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'text/plain' },
+          body: JSON.stringify(statePayload)
+        });
+      } catch(e){}
+    }
+
+    async function sendStudentAnswerPayload(payload) {
+      const dataMsg = {
+        type: 'SUBMIT_ANSWER',
+        payload: payload,
+        timestamp: Date.now()
+      };
+
+      try {
+        if (typeof BroadcastChannel !== 'undefined') {
+          new BroadcastChannel(`4a_bc_${state.roomCode}`).postMessage(dataMsg);
+        }
+      } catch(e){}
+
+      try {
+        await fetch(`https://ntfy.sh/4a_quiz_ans_${state.roomCode}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'text/plain' },
+          body: JSON.stringify(dataMsg)
+        });
+      } catch(e){}
+    }
+
+    async function fetchLatestSyncData() {
+      const nowStr = new Date().toLocaleTimeString();
+
+      if (state.appMode === 'student' || isStudentOnly) {
+        try {
+          const res = await fetch(`https://ntfy.sh/4a_quiz_state_${state.roomCode}/json?poll=1&limit=1&_t=${Date.now()}`, {
+            cache: 'no-store',
+            headers: { 'Cache-Control': 'no-cache, no-store, must-revalidate' }
+          });
+          if (res.ok) {
+            const text = await res.text();
+            if (text.trim()) {
+              const lines = text.trim().split('\n');
+              const lastLine = lines[lines.length - 1];
+              const item = JSON.parse(lastLine);
+              if (item && item.message) {
+                const data = JSON.parse(item.message);
+                if (data.type === 'ROOM_STATE') {
+                  updateStudentActiveState(data);
+                }
+              }
+            }
+          }
+          state.syncStatusText = `🟢 ${nowStr} (已連線)`;
+        } catch(e){
+          state.syncStatusText = `🟡 ${nowStr} (網絡連線中)`;
+        }
+      }
+
+      if (state.appMode === 'teacher' && !isStudentOnly) {
+        try {
+          const res = await fetch(`https://ntfy.sh/4a_quiz_ans_${state.roomCode}/json?poll=1&since=10m&limit=100&_t=${Date.now()}`, {
+            cache: 'no-store',
+            headers: { 'Cache-Control': 'no-cache, no-store, must-revalidate' }
+          });
+          if (res.ok) {
+            const text = await res.text();
+            if (text.trim()) {
+              const lines = text.trim().split('\n');
+              lines.forEach(line => {
+                try {
+                  const item = JSON.parse(line);
+                  if (item && item.message) {
+                    const data = JSON.parse(item.message);
+                    if (data.type === 'SUBMIT_ANSWER' && data.payload) {
+                      state.studentAnswers[data.payload.seat] = data.payload;
+                    }
+                  }
+                } catch(e){}
+              });
+              safeRender();
+            }
+            state.syncStatusText = `🟢 ${nowStr} (實時監控中)`;
+          }
+        } catch(e){}
+      }
+    }
+
+    function updateStudentActiveState(data) {
+      const incomingQ = data.question;
+      const isNewQ = !state.activeQuestion || (incomingQ && state.activeQuestion.id !== incomingQ.id);
+
+      if (isNewQ || state.showAnswer !== data.showAnswer) {
+        state.activeQuestion = incomingQ;
+        state.showAnswer = data.showAnswer;
+        state.lastQTime = data.timeStr || '';
+
+        if (isNewQ) {
+          state.studentDragSelections = {};
+          state.studentNumericInput = '';
+          state.studentMcChoice = null;
+          state.hasSubmittedCurrentQ = false;
+          state.noticeMessage = '';
+        }
+        safeRender();
+      }
+    }
+
+    function handleSyncMessage(data) {
+      if (!data || !data.type) return;
+      if (data.type === 'ROOM_STATE') {
+        updateStudentActiveState(data);
+      } else if (data.type === 'SUBMIT_ANSWER' && data.payload) {
+        state.studentAnswers[data.payload.seat] = data.payload;
+        safeRender();
+      }
+    }
+
+    function showNotice(msg, type = 'info') {
+      state.noticeMessage = msg;
+      state.noticeType = type;
+      safeRender();
+    }
+
+    window.submitMcAnswer = () => {
+      if (state.studentMcChoice === null || state.studentMcChoice === undefined) {
+        showNotice('⚠️ 請先點選一個選項 (A / B / C / D)！', 'warning');
+        return;
+      }
+      const lbls = ['A', 'B', 'C', 'D'];
+      const optText = state.activeQuestion?.options?.[state.studentMcChoice] || '';
+      const ansStr = `(${lbls[state.studentMcChoice]}) ${optText}`;
+      handleStudentSubmit(ansStr);
+    };
+
+    window.submitDragAnswer = () => {
+      const selections = state.studentDragSelections || {};
+      if (Object.keys(selections).length === 0) {
+        showNotice('⚠️ 請先將詞條填入位置！', 'warning');
+        return;
+      }
+      handleStudentSubmit(selections);
+    };
+
+    window.submitNumericAnswer = () => {
+      const val = (state.studentNumericInput || '').trim();
+      if (!val) {
+        showNotice('⚠️ 請先輸入數字答案！', 'warning');
+        return;
+      }
+      const unit = state.activeQuestion?.unit || '';
+      handleStudentSubmit(`${val} ${unit}`.trim());
+    };
+
+    window.handleStudentSubmit = async (ansData) => {
+      if (!state.studentSeat) {
+        showNotice('⚠️ 請先選擇你的課堂座號！', 'warning');
+        return;
+      }
+
+      state.isSubmitting = true;
+      safeRender();
+
+      const timeStr = new Date().toLocaleTimeString();
+      const payload = {
+        seat: state.studentSeat,
+        answer: ansData,
+        timestamp: timeStr,
+        qId: state.activeQuestion?.id || 'unknown'
+      };
+
+      state.studentAnswers[state.studentSeat] = payload;
+      state.hasSubmittedCurrentQ = true;
+
+      await sendStudentAnswerPayload(payload);
+
+      state.isSubmitting = false;
+      showNotice(`✅ 座號 ${state.studentSeat} 號：答案已於 ${timeStr} 成功發送至老師螢幕！`, 'success');
+      safeRender();
+    };
+
+    window.setAppMode = (mode) => { if(!isStudentOnly) { state.appMode = mode; safeRender(); } };
+    window.setTeacherTab = (tab) => { state.teacherTab = tab; safeRender(); };
+    window.setStudentSeat = (seat) => { state.studentSeat = seat; safeRender(); };
+    window.setShowQrModal = (show) => { state.showQrModal = show; safeRender(); };
+
+    window.handleChangeRoomCode = () => {
+      const newRoom = prompt("請輸入房間代碼（老師與學生需一致）：", state.roomCode);
+      if (newRoom && newRoom.trim()) {
+        state.roomCode = newRoom.trim();
+        state.studentAnswers = {};
+        initCloudSync();
+        safeRender();
+      }
+    };
+
+    window.handleClearAllStudentAnswers = () => {
+      if (confirm('確定要清空當前 26 人學生的作答牆紀錄嗎？')) {
+        state.studentAnswers = {};
+        safeRender();
+      }
+    };
+    
+    window.handlePushQuestion = (qId) => {
+      const q = state.questionBank.find(item => item.id === qId);
+      if (q) {
+        state.activeQuestion = q;
+        state.showAnswer = false;
+        state.studentAnswers = {};
+        publishRoomState(q, false);
+        safeRender();
+      }
+    };
+
+    window.handleToggleShowAnswer = () => {
+      state.showAnswer = !state.showAnswer;
+      publishRoomState(state.activeQuestion, state.showAnswer);
+      safeRender();
+    };
+
+    window.handleManualRefresh = () => {
+      fetchLatestSyncData();
+      showNotice('🔄 已更新最新資料！', 'info');
+    };
+
+    window.handleSelectBlankWord = (word) => {
+      const cnt = state.activeQuestion?.blankCount || 3;
+      for (let i = 1; i <= cnt; i++) {
+        const k = `b${i}`;
+        if (!state.studentDragSelections[k]) {
+          state.studentDragSelections[k] = word;
+          break;
+        }
+      }
+      safeRender();
+    };
+
+    window.handleClearBlanks = () => { state.studentDragSelections = {}; safeRender(); };
+
+    window.handleNumericKey = (btn) => {
+      if (btn === 'C') state.studentNumericInput = '';
+      else if (btn === '⌫') state.studentNumericInput = state.studentNumericInput.slice(0, -1);
+      else state.studentNumericInput += btn;
+      safeRender();
+    };
+
+    window.handleExportBank = () => {
+      const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(state.questionBank, null, 2));
+      const anchor = document.createElement('a');
+      anchor.setAttribute("href", dataStr);
+      anchor.setAttribute("download", `4A班科學題庫_${new Date().toISOString().slice(0,10)}.json`);
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+    };
+
+    window.handleImportBank = (e) => {
+      const file = e.target.files[0];
+      if (file) {
+        const reader = new FileReader();
+        reader.onload = (evt) => {
+          try {
+            const imported = JSON.parse(evt.target.result);
+            if (Array.isArray(imported)) {
+              state.questionBank = imported;
+              saveBank();
+              alert('✅ 成功匯入題庫！');
+              safeRender();
+            }
+          } catch (err) { alert('❌ 解析檔案失敗。'); }
+        };
+        reader.readAsText(file);
+      }
+    };
+
+    window.handleResetBank = () => {
+      if (confirm('確定要恢復預設題庫嗎？')) {
+        state.questionBank = DEFAULT_BANK;
+        localStorage.removeItem('4a_quiz_bank_v17');
+        safeRender();
+      }
+    };
+
+    window.handleImageUpload = (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      const reader = new FileReader();
+      reader.onload = (evt) => {
+        const img = new Image();
+        img.onload = () => {
+          const canvas = document.createElement('canvas');
+          const maxDim = 800;
+          let width = img.width;
+          let height = img.height;
+
+          if (width > height) {
+            if (width > maxDim) {
+              height *= maxDim / width;
+              width = maxDim;
+            }
+          } else {
+            if (height > maxDim) {
+              width *= maxDim / height;
+              height = maxDim;
+            }
+          }
+
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(img, 0, 0, width, height);
+
+          const compressedUrl = canvas.toDataURL('image/jpeg', 0.75);
+          state.qCustomUrl = compressedUrl;
+
+          const previewBox = document.getElementById('image_preview_box');
+          if (previewBox) {
+            previewBox.innerHTML = `
+              <div class="mt-2 text-center p-3 bg-emerald-50 rounded-xl border border-emerald-200">
+                <p class="text-xs text-emerald-700 font-bold mb-1">✅ 圖片成功上傳與壓縮！</p>
+                <img src="${compressedUrl}" class="max-h-44 mx-auto rounded-lg shadow-sm border border-emerald-300" />
+                <button type="button" onclick="handleRemoveImage()" class="mt-2 text-xs text-rose-600 font-bold underline hover:text-rose-800">🗑️ 移除圖片</button>
+              </div>
+            `;
+          }
+        };
+        img.src = evt.target.result;
+      };
+      reader.readAsDataURL(file);
+    };
+
+    window.handleUrlInput = (e) => {
+      const url = e.target.value.trim();
+      if (url) {
+        state.qCustomUrl = url;
+        const previewBox = document.getElementById('image_preview_box');
+        if (previewBox) {
+          previewBox.innerHTML = `
+            <div class="mt-2 text-center p-2 bg-indigo-50 rounded-xl border border-indigo-200">
+              <p class="text-xs text-indigo-700 font-bold mb-1">🌐 網址圖片預覽：</p>
+              <img src="${url}" class="max-h-40 mx-auto rounded-lg shadow-sm" />
+              <button type="button" onclick="handleRemoveImage()" class="mt-2 text-xs text-rose-600 font-bold underline hover:text-rose-800">🗑️ 移除圖片</button>
+            </div>
+          `;
+        }
+      }
+    };
+
+    window.handleRemoveImage = () => {
+      state.qCustomUrl = '';
+      const previewBox = document.getElementById('image_preview_box');
+      if (previewBox) previewBox.innerHTML = '';
+      const fileInput = document.getElementById('form_file_input');
+      if (fileInput) fileInput.value = '';
+      const urlInput = document.getElementById('form_url');
+      if (urlInput) urlInput.value = '';
+    };
+
+    window.handleSaveNewQuestion = (e) => {
+      e.preventDefault();
+      const title = document.getElementById('form_title').value.trim();
+      if (!title) { alert('請輸入題目敘述！'); return; }
+
+      const type = state.newQType;
+      const explanation = document.getElementById('form_explanation').value.trim() || '課堂觀念解析與討論';
+      const customUrl = state.qCustomUrl || (document.getElementById('form_url') ? document.getElementById('form_url').value.trim() : '');
+
+      let newQ = { id: 'q_' + Date.now(), type, title, customImageUrl: customUrl, explanation };
+
+      if (type === 'drag') {
+        const cnt = Number(state.qBlankCount);
+        const words = [];
+        const correctMap = {};
+        for (let i = 0; i < cnt; i++) {
+          const w = (document.getElementById(`drag_word_${i}`)?.value || '').trim() || `詞條${i+1}`;
+          words.push(w);
+          correctMap[`b${i+1}`] = w;
+        }
+        newQ.blankCount = cnt;
+        newQ.options = words;
+        newQ.correctAnswer = correctMap;
+      } else if (type === 'mc') {
+        const opts = [
+          document.getElementById('mc_opt_0').value.trim() || '選項 A',
+          document.getElementById('mc_opt_1').value.trim() || '選項 B',
+          document.getElementById('mc_opt_2').value.trim() || '選項 C',
+          document.getElementById('mc_opt_3').value.trim() || '選項 D'
+        ];
+        const correctRadio = document.querySelector('input[name="mc_correct"]:checked');
+        newQ.options = opts;
+        newQ.correctAnswer = correctRadio ? Number(correctRadio.value) : 0;
+      } else if (type === 'numeric') {
+        newQ.correctAnswer = document.getElementById('numeric_ans').value.trim();
+        newQ.unit = document.getElementById('numeric_unit').value.trim();
+      }
+
+      state.questionBank.unshift(newQ);
+      saveBank();
+      state.qCustomUrl = '';
+      state.teacherTab = 'bank';
+      safeRender();
+    };
+
+    window.handleSaveExplanationEdit = (qId) => {
+      const val = document.getElementById(`edit_exp_input_${qId}`).value;
+      state.questionBank = state.questionBank.map(q => q.id === qId ? { ...q, explanation: val } : q);
+      if (state.activeQuestion && state.activeQuestion.id === qId) {
+        state.activeQuestion.explanation = val;
+      }
+      saveBank();
+      state.editingQId = null;
+      safeRender();
+    };
+
+    function safeRender() {
+      try { render(); } catch(err) { console.error("Render Error:", err); }
+    }
+
+    function render() {
+      const appEl = document.getElementById('app');
+      if (!appEl) return;
+
+      const studentOnlyUrl = window.location.origin + window.location.pathname + `?mode=student&room=${state.roomCode}`;
+      const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=${encodeURIComponent(studentOnlyUrl)}`;
+
+      let html = `
+        <div class="max-w-5xl mx-auto p-4 sm:p-6">
+          <header class="bg-white rounded-2xl p-4 shadow-sm mb-6 flex flex-wrap items-center justify-between gap-4 border border-slate-200">
+            <div class="flex items-center gap-3">
+              <span class="text-3xl">🚀</span>
+              <div>
+                <h1 class="text-2xl font-black text-slate-800 tracking-tight">4A 班問答大賽</h1>
+                <div class="flex items-center gap-2 mt-1">
+                  <span class="text-[11px] font-bold text-emerald-600 bg-emerald-50 px-2.5 py-0.5 rounded-full">
+                    ${state.syncStatusText}
+                  </span>
+                  <button onclick="handleChangeRoomCode()" class="text-[11px] font-bold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 px-2.5 py-0.5 rounded-full transition">
+                    🔑 房間碼: ${state.roomCode} (點擊修改)
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            ${!isStudentOnly ? `
+              <div class="flex items-center gap-2">
+                <button onclick="setShowQrModal(true)" class="bg-emerald-600 hover:bg-emerald-700 text-white px-3.5 py-2 rounded-xl text-sm font-bold flex items-center gap-1.5 transition shadow-xs">
+                  📱 學生掃碼加入
+                </button>
+                <div class="bg-slate-100 p-1 rounded-xl flex">
+                  <button onclick="setAppMode('teacher')" class="px-3 py-1.5 rounded-lg text-sm font-bold transition ${state.appMode === 'teacher' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-600 hover:text-slate-900'}">
+                    教師端
+                  </button>
+                  <button onclick="setAppMode('student')" class="px-3 py-1.5 rounded-lg text-sm font-bold transition ${state.appMode === 'student' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-600 hover:text-slate-900'}">
+                    學生 iPad 端
+                  </button>
+                </div>
+              </div>
+            ` : `
+              <div class="flex items-center gap-2">
+                <button onclick="handleManualRefresh()" class="bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-xs px-3 py-1.5 rounded-xl font-bold transition">
+                  🔄 強刷最新題目
+                </button>
+                <span class="bg-indigo-100 text-indigo-800 text-xs px-3 py-1.5 rounded-xl font-bold">
+                  📱 學生端 (房間: ${state.roomCode})
+                </span>
+              </div>
+            `}
+          </header>
+
+          ${state.noticeMessage ? `
+            <div class="mb-4 p-3.5 rounded-2xl text-xs font-bold transition flex items-center justify-between ${state.noticeType === 'success' ? 'bg-emerald-100 text-emerald-900 border border-emerald-300' : state.noticeType === 'warning' ? 'bg-amber-100 text-amber-900 border border-amber-300' : 'bg-indigo-100 text-indigo-900 border border-indigo-300'}">
+              <span>${state.noticeMessage}</span>
+              <button onclick="state.noticeMessage=''; safeRender();" class="text-slate-400 hover:text-slate-700">✕</button>
+            </div>
+          ` : ''}
+
+          ${state.showQrModal && !isStudentOnly ? `
+            <div class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+              <div class="bg-white rounded-3xl p-6 max-w-sm w-full text-center shadow-2xl relative border border-slate-100">
+                <button onclick="setShowQrModal(false)" class="absolute top-4 right-4 text-slate-400 hover:text-slate-700 font-bold text-xl">✕</button>
+                <h3 class="text-xl font-bold text-slate-800 mb-1">iPad 掃碼進入問答</h3>
+                <p class="text-xs text-slate-500 mb-4">請學生使用 iPad 相機掃描二維碼</p>
+                <img src="${qrUrl}" alt="QR Code" class="w-56 h-56 mx-auto rounded-2xl border-2 border-slate-100 p-2 shadow-inner mb-4" />
+                <p class="text-[11px] font-mono text-indigo-600 bg-indigo-50 p-2 rounded-xl break-all">
+                  ${studentOnlyUrl}
+                </p>
+              </div>
+            </div>
+          ` : ''}
+      `;
+
+      // ---------------- 教師端界面 ----------------
+      if (state.appMode === 'teacher' && !isStudentOnly) {
+        html += `
+          <div class="space-y-6">
+            <div class="flex border-b border-slate-200 gap-4">
+              <button onclick="setTeacherTab('monitor')" class="pb-3 text-sm font-bold transition border-b-2 ${state.teacherTab === 'monitor' ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-slate-500 hover:text-slate-800'}">
+                📊 26人實時監控牆
+              </button>
+              <button onclick="setTeacherTab('bank')" class="pb-3 text-sm font-bold transition border-b-2 ${state.teacherTab === 'bank' ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-slate-500 hover:text-slate-800'}">
+                📚 題庫管理 (${state.questionBank.length})
+              </button>
+              <button onclick="setTeacherTab('add')" class="pb-3 text-sm font-bold transition border-b-2 ${state.teacherTab === 'add' ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-slate-500 hover:text-slate-800'}">
+                ➕ 新增題目 (含討論題)
+              </button>
+            </div>
+        `;
+
+        if (state.teacherTab === 'monitor') {
+          const q = state.activeQuestion;
+          html += `
+            <div class="space-y-6">
+              <div class="bg-indigo-950 text-white rounded-3xl p-6 shadow-xl relative overflow-hidden">
+                <div class="flex flex-wrap items-center justify-between gap-4 border-b border-indigo-800/80 pb-4 mb-4">
+                  <div class="flex items-center gap-2">
+                    <span class="bg-indigo-700 text-indigo-100 text-xs px-3 py-1 rounded-full font-bold">當前發布題目</span>
+                    ${q ? '<span class="bg-emerald-500 text-white text-xs px-2.5 py-1 rounded-full font-bold">進行中</span>' : ''}
+                  </div>
+                  ${q ? `
+                    <button onclick="handleToggleShowAnswer()" class="px-4 py-2 rounded-xl text-sm font-bold transition flex items-center gap-2 ${state.showAnswer ? 'bg-amber-400 text-amber-950' : 'bg-indigo-600 hover:bg-indigo-500 text-white'}">
+                      ${state.showAnswer ? '🙈 隱藏解答與觀念指引' : '🏆 公布解答與觀念指引'}
+                    </button>
+                  ` : ''}
+                </div>
+
+                ${q ? `
+                  <div class="space-y-4">
+                    <span class="text-xs bg-indigo-700 px-2.5 py-1 rounded-lg font-bold">
+                      ${q.type === 'drag' ? '🖼️ 圖文填空題' : q.type === 'numeric' ? '🔢 數字填空題' : q.type === 'mc' ? '🔘 單項選擇題' : '💬 課堂討論題'}
+                    </span>
+                    <h2 class="text-xl font-bold">${q.title}</h2>
+                    ${q.customImageUrl ? `
+                      <div class="text-center bg-slate-900/50 p-3 rounded-2xl border border-indigo-700/50">
+                        <img src="${q.customImageUrl}" class="max-h-60 object-contain rounded-xl mx-auto shadow-md" />
+                      </div>
+                    ` : ''}
+                    ${q.type === 'discussion' ? `
+                      <div class="bg-cyan-500/20 border border-cyan-400/50 p-3 rounded-xl text-cyan-200 text-xs font-bold">
+                        💬 提醒：本題為討論題，學生端無須線上提交，請組織學生分組討論。
+                      </div>
+                    ` : ''}
+                    ${state.showAnswer ? `
+                      <div class="bg-amber-500/20 border-2 border-amber-400 p-4 rounded-2xl text-amber-100">
+                        <div class="font-bold text-amber-300 mb-1">🏆 標準答案與觀念解析 / 討論重點：</div>
+                        <p class="text-sm font-semibold">${q.explanation || '未設定解析'}</p>
+                      </div>
+                    ` : ''}
+                  </div>
+                ` : `
+                  <div class="text-center py-8 text-indigo-300">
+                    <p class="text-lg font-bold mb-2">課堂準備中，尚未發布題目</p>
+                    <p class="text-xs">請切換至「📚 題庫管理」選擇題目並點擊「🚀 發布至學生 iPad」</p>
+                  </div>
+                `}
+              </div>
+
+              <div class="bg-white p-6 rounded-3xl shadow-sm border border-slate-200">
+                <div class="flex items-center justify-between mb-4">
+                  <h3 class="font-bold text-slate-800 text-lg">
+                    4A 班 26 座號學生實時作答牆
+                    <span class="text-xs font-normal text-slate-500 ml-2">(已收到 ${Object.keys(state.studentAnswers).length} / 26 人作答)</span>
+                  </h3>
+                  <button onclick="handleClearAllStudentAnswers()" class="text-xs bg-rose-50 hover:bg-rose-100 text-rose-600 border border-rose-200 font-bold px-3 py-1.5 rounded-xl transition">
+                    🧹 清空作答牆
+                  </button>
+                </div>
+                <div class="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-7 gap-3">
+                  ${Array.from({ length: 26 }, (_, i) => i + 1).map(num => {
+                    const sub = state.studentAnswers[num];
+                    return `
+                      <div class="p-3 rounded-2xl border-2 transition text-center relative overflow-hidden ${sub ? 'bg-emerald-50 border-emerald-400 text-emerald-950' : 'bg-slate-50 border-slate-200 text-slate-400'}">
+                        <div class="flex items-center justify-between mb-1">
+                          <span class="text-xs font-bold px-2 py-0.5 rounded-md bg-white/80 text-slate-700 shadow-xs">${num} 號</span>
+                          <span class="w-2 h-2 rounded-full ${sub ? 'bg-emerald-500 animate-pulse' : 'bg-slate-300'}"></span>
+                        </div>
+                        <div class="py-2 min-h-[50px] flex items-center justify-center">
+                          ${sub ? `<span class="text-xs font-bold text-emerald-800 break-all">${typeof sub.answer === 'object' ? JSON.stringify(sub.answer).replace(/[{}"]/g, '') : sub.answer}</span>` : `<span class="text-xs text-slate-400">${q?.type === 'discussion' ? '討論中...' : '思考中...'}</span>`}
+                        </div>
+                        ${sub ? `<p class="text-[10px] text-emerald-600 font-mono">${sub.timestamp}</p>` : ''}
+                      </div>
+                    `;
+                  }).join('')}
+                </div>
+              </div>
+            </div>
+          `;
+        }
+
+        if (state.teacherTab === 'bank') {
+          html += `
+            <div class="space-y-4">
+              <div class="bg-indigo-50 p-4 rounded-2xl border border-indigo-200 flex flex-wrap items-center justify-between gap-3 text-xs">
+                <div>
+                  <h4 class="font-bold text-indigo-900 text-sm">📲 跨裝置題庫傳輸工具 (電腦 ➔ iPad)</h4>
+                  <p class="text-indigo-700">網址圖片 (URL) 可全班自動顯示；本機圖片建議點擊「匯出題庫」傳給 iPad 「匯入」即可同步！</p>
+                </div>
+                <div class="flex items-center gap-2">
+                  <button onclick="handleExportBank()" class="bg-indigo-600 hover:bg-indigo-700 text-white font-bold px-3.5 py-2 rounded-xl transition">📥 匯出題庫檔案 (JSON)</button>
+                  <label class="bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-3.5 py-2 rounded-xl transition cursor-pointer">
+                    📤 匯入題庫檔案
+                    <input type="file" accept=".json" onchange="handleImportBank(event)" class="hidden" />
+                  </label>
+                  <button onclick="handleResetBank()" class="text-rose-600 underline font-bold ml-2">🔄 重置</button>
+                </div>
+              </div>
+
+              ${state.questionBank.map(q => `
+                <div class="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm space-y-3">
+                  <div class="flex items-start justify-between gap-4">
+                    <div>
+                      <div class="flex items-center gap-2 mb-2">
+                        <span class="inline-block px-2.5 py-1 rounded-lg text-xs font-bold ${q.type === 'discussion' ? 'bg-cyan-100 text-cyan-800' : 'bg-indigo-50 text-indigo-700'}">
+                          ${q.type === 'drag' ? '🖼️ 圖文填空題' : q.type === 'numeric' ? '🔢 數字填空題' : q.type === 'mc' ? '🔘 單項選擇題' : '💬 課堂討論題'}
+                        </span>
+                        ${q.customImageUrl ? '<span class="text-xs bg-slate-100 text-slate-600 px-2 py-0.5 rounded-md font-bold">📷 含圖片</span>' : ''}
+                        ${q.type === 'numeric' && q.unit ? `<span class="text-xs bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-md font-bold">單位：${q.unit}</span>` : ''}
+                      </div>
+                      <h3 class="font-bold text-slate-800 text-base">${q.title}</h3>
+                    </div>
+                    <button onclick="handlePushQuestion('${q.id}')" class="bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-4 py-2 rounded-xl text-sm shrink-0 shadow-sm">
+                      🚀 發布至學生 iPad
+                    </button>
+                  </div>
+                  <div class="bg-slate-50 p-3 rounded-xl border border-slate-200">
+                    ${state.editingQId === q.id ? `
+                      <div class="space-y-2">
+                        <label class="block text-xs font-bold text-slate-700">修改標準答案 / 討論觀念指引：</label>
+                        <textarea id="edit_exp_input_${q.id}" class="w-full p-2 border border-slate-300 rounded-lg text-xs" rows="2">${q.explanation || ''}</textarea>
+                        <button onclick="handleSaveExplanationEdit('${q.id}')" class="bg-indigo-600 text-white text-xs font-bold px-3 py-1.5 rounded-lg">儲存修改</button>
+                      </div>
+                    ` : `
+                      <div class="flex items-center justify-between text-xs">
+                        <p class="text-slate-600 font-medium"><span class="font-bold text-slate-800">🏆 解答 / 討論重點：</span> ${q.explanation || '未設定'}</p>
+                        <button onclick="state.editingQId = '${q.id}'; safeRender();" class="text-indigo-600 hover:text-indigo-800 font-bold shrink-0 ml-2">✏️ 編輯解答內容</button>
+                      </div>
+                    `}
+                  </div>
+                </div>
+              `).join('')}
+            </div>
+          `;
+        }
+
+        if (state.teacherTab === 'add') {
+          html += `
+            <form onsubmit="handleSaveNewQuestion(event)" class="bg-white p-6 rounded-3xl shadow-sm border border-slate-200 space-y-6">
+              <h3 class="font-bold text-slate-800 text-lg border-b pb-3">➕ 預設題目與出題設定</h3>
+              <div>
+                <label class="block text-sm font-bold text-slate-700 mb-2">1. 選擇題型</label>
+                <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  ${['drag', 'numeric', 'mc', 'discussion'].map(typeKey => {
+                    const labels = { drag: '🖼️ 圖文填空題', numeric: '🔢 數字填空題', mc: '🔘 單項選擇題', discussion: '💬 課堂討論題' };
+                    const isSel = state.newQType === typeKey;
+                    return `
+                      <button type="button" onclick="state.newQType='${typeKey}'; safeRender();" class="p-3 rounded-xl border-2 font-bold text-xs sm:text-sm text-center transition ${isSel ? 'border-indigo-600 bg-indigo-50 text-indigo-700' : 'border-slate-200 text-slate-600'}">
+                        ${labels[typeKey]}
+                      </button>
+                    `;
+                  }).join('')}
+                </div>
+              </div>
+              <div>
+                <label class="block text-sm font-bold text-slate-700 mb-2">2. 題目敘述 / 討論主題</label>
+                <input type="text" id="form_title" placeholder="例：請看下圖並回答觀念..." class="w-full p-3 border border-slate-300 rounded-xl text-sm font-medium focus:ring-2 focus:ring-indigo-500 outline-none" />
+              </div>
+              
+              <div class="p-4 bg-slate-50 rounded-2xl border border-slate-200 space-y-3">
+                <label class="block text-sm font-bold text-slate-700">3. 插入題目圖片 (所有題型皆適用)</label>
+                <input type="file" id="form_file_input" accept="image/*" onchange="handleImageUpload(event)" class="block w-full text-xs text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-xs file:font-bold file:bg-indigo-50 file:text-indigo-700 cursor-pointer" />
+                <p class="text-xs text-slate-400 font-bold">或輸入圖片網址 (URL)：</p>
+                <input type="text" id="form_url" placeholder="https://..." oninput="handleUrlInput(event)" class="w-full p-2.5 border border-slate-300 rounded-xl text-xs font-mono" />
+                
+                <div id="image_preview_box">
+                  ${state.qCustomUrl ? `
+                    <div class="mt-2 text-center p-3 bg-emerald-50 rounded-xl border border-emerald-200">
+                      <p class="text-xs text-emerald-700 font-bold mb-1">✅ 圖片已選擇！</p>
+                      <img src="${state.qCustomUrl}" class="max-h-44 mx-auto rounded-lg shadow-sm border border-emerald-300" />
+                      <button type="button" onclick="handleRemoveImage()" class="mt-2 text-xs text-rose-600 font-bold underline hover:text-rose-800">🗑️ 移除圖片</button>
+                    </div>
+                  ` : ''}
+                </div>
+              </div>
+
+              ${state.newQType === 'drag' ? `
+                <div class="p-4 bg-slate-50 rounded-2xl border border-slate-200 space-y-4">
+                  <div>
+                    <label class="block text-sm font-bold text-slate-700 mb-2">4. 設定填空個數 (3 至 5 個)</label>
+                    <div class="flex gap-3">
+                      ${[3, 4, 5].map(cnt => `
+                        <button type="button" onclick="state.qBlankCount=${cnt}; safeRender();" class="px-4 py-2 rounded-xl border-2 font-bold text-sm ${state.qBlankCount === cnt ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white border-slate-200 text-slate-700'}">
+                          ${cnt} 個填空
+                        </button>
+                      `).join('')}
+                    </div>
+                  </div>
+                  <div>
+                    <label class="block text-sm font-bold text-slate-700 mb-2">5. 設定填空的標準答案詞庫</label>
+                    <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                      ${Array.from({ length: state.qBlankCount }).map((_, idx) => `
+                        <div>
+                          <span class="text-xs text-slate-500 font-bold mb-1 block">位置 ⓪${idx + 1} 答案：</span>
+                          <input type="text" id="drag_word_${idx}" placeholder="例如：火成岩" class="w-full p-2 border border-slate-300 rounded-lg text-xs font-bold" />
+                        </div>
+                      `).join('')}
+                    </div>
+                  </div>
+                </div>
+              ` : ''}
+
+              ${state.newQType === 'mc' ? `
+                <div class="p-4 bg-slate-50 rounded-2xl border border-slate-200 space-y-3">
+                  <label class="block text-sm font-bold text-slate-700">4. 設定 4 個單選選項與正確答案</label>
+                  <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    ${['A', 'B', 'C', 'D'].map((lbl, idx) => `
+                      <div class="flex items-center gap-2 bg-white p-2.5 rounded-xl border border-slate-200">
+                        <input type="radio" name="mc_correct" value="${idx}" ${idx === 0 ? 'checked' : ''} class="w-4 h-4 text-indigo-600" />
+                        <span class="font-bold text-xs text-indigo-700 w-6">(${lbl})</span>
+                        <input type="text" id="mc_opt_${idx}" placeholder="選項 ${lbl} 內容" class="w-full p-1.5 border border-slate-200 rounded-lg text-xs font-bold" />
+                      </div>
+                    `).join('')}
+                  </div>
+                </div>
+              ` : ''}
+
+              ${state.newQType === 'numeric' ? `
+                <div class="p-4 bg-slate-50 rounded-2xl border border-slate-200 space-y-3">
+                  <div>
+                    <label class="block text-sm font-bold text-slate-700 mb-1">4. 標準數字答案</label>
+                    <input type="number" id="numeric_ans" placeholder="例如：100" class="w-full p-3 border border-slate-300 rounded-xl text-base font-bold font-mono" />
+                  </div>
+                  <div>
+                    <label class="block text-sm font-bold text-slate-700 mb-1">5. 自訂單位 (無單位請留空)</label>
+                    <input type="text" id="numeric_unit" placeholder="例如：°C、g、cm" class="w-full p-2.5 border border-slate-300 rounded-xl text-sm font-bold" />
+                  </div>
+                </div>
+              ` : ''}
+
+              <div>
+                <label class="block text-sm font-bold text-slate-700 mb-2">標準答案與觀念解析 / 討論指引</label>
+                <textarea id="form_explanation" placeholder="詳細觀念說明..." class="w-full p-3 border border-slate-300 rounded-xl text-sm font-medium focus:ring-2 focus:ring-indigo-500 outline-none" rows="3"></textarea>
+              </div>
+
+              <button type="submit" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3.5 rounded-xl shadow-md transition">
+                💾 儲存題目至題庫 (永久保存)
+              </button>
+            </form>
+          `;
+        }
+        html += `</div>`;
+      }
+
+      // ---------------- 學生 iPad 端 ----------------
+      if (state.appMode === 'student' || isStudentOnly) {
+        html += `<div class="space-y-6">`;
+        if (!state.studentSeat) {
+          html += `
+            <div class="bg-white p-6 rounded-3xl shadow-md border border-slate-200 text-center space-y-6">
+              <div>
+                <h2 class="text-2xl font-black text-slate-800 mb-1">請選擇你的課堂座號</h2>
+                <p class="text-xs text-slate-500">點擊座號後進入問答大賽等待區</p>
+              </div>
+              <div class="grid grid-cols-4 sm:grid-cols-6 gap-3 max-w-xl mx-auto">
+                ${Array.from({ length: 26 }, (_, i) => i + 1).map(num => `
+                  <button onclick="setStudentSeat(${num})" class="p-4 bg-indigo-50 hover:bg-indigo-600 text-indigo-700 hover:text-white rounded-2xl text-xl font-black transition border border-indigo-100 active:scale-95">
+                    ${num}
+                  </button>
+                `).join('')}
+              </div>
+            </div>
+          `;
+        } else {
+          const q = state.activeQuestion;
+          const matchedQFromBank = q ? state.questionBank.find(item => item.id === q.id) : null;
+          const displayImgUrl = q?.customImageUrl || matchedQFromBank?.customImageUrl;
+
+          html += `
+            <div class="space-y-6">
+              <div class="bg-slate-800 text-white p-4 rounded-2xl flex items-center justify-between">
+                <div class="flex items-center gap-2">
+                  <span class="bg-indigo-500 text-white text-xs px-3 py-1 rounded-full font-bold">4A 班學生 iPad</span>
+                  <span class="font-black text-lg">座號：${state.studentSeat} 號</span>
+                </div>
+                <button onclick="setStudentSeat(null)" class="text-xs bg-slate-700 hover:bg-slate-600 px-3 py-1.5 rounded-lg text-slate-300">重選座號</button>
+              </div>
+
+              ${q ? `
+                <div class="bg-white p-6 rounded-3xl shadow-md border border-slate-200 space-y-6">
+                  <div class="flex items-center justify-between">
+                    <div>
+                      <h2 class="text-xl font-bold text-slate-800">${q.title}</h2>
+                      ${state.lastQTime ? `<p class="text-[10px] text-slate-400">發布時間: ${state.lastQTime}</p>` : ''}
+                    </div>
+                    ${state.hasSubmittedCurrentQ ? '<span class="bg-emerald-100 text-emerald-800 font-bold text-xs px-3 py-1 rounded-full border border-emerald-300">✅ 答案已傳送</span>' : ''}
+                  </div>
+
+                  ${q.type === 'drag' ? `
+                    <div class="space-y-6">
+                      ${displayImgUrl ? `<div class="text-center"><img src="${displayImgUrl}" class="max-h-72 object-contain rounded-2xl mx-auto border border-slate-200" /></div>` : ''}
+                      <div class="grid grid-cols-3 gap-2 max-w-lg mx-auto">
+                        ${Array.from({ length: q.blankCount || 3 }).map((_, idx) => {
+                          const val = state.studentDragSelections[`b${idx+1}`];
+                          return `
+                            <div class="p-3 rounded-xl border-2 text-center ${val ? 'bg-indigo-900 text-white font-bold' : 'bg-slate-100 border-dashed text-slate-400'}">
+                              <span class="text-[10px] block opacity-75">位置 ⓪${idx+1}</span>
+                              <span class="text-sm font-bold">${val || '待填入'}</span>
+                            </div>
+                          `;
+                        }).join('')}
+                      </div>
+
+                      <div class="bg-slate-100 p-4 rounded-2xl text-center space-y-3">
+                        <p class="text-xs font-bold text-slate-500">點擊下方詞條，順序填入圖表位置：</p>
+                        <div class="flex flex-wrap justify-center gap-2">
+                          ${q.options?.map((w) => {
+                            const isSel = Object.values(state.studentDragSelections).includes(w);
+                            return `
+                              <button onclick="handleSelectBlankWord('${w}')" ${isSel ? 'disabled' : ''} class="px-4 py-2.5 rounded-xl text-sm font-bold ${isSel ? 'bg-slate-300 text-slate-500' : 'bg-indigo-600 text-white hover:bg-indigo-700 active:scale-95'}">
+                                ${w} ${isSel ? '✓' : ''}
+                              </button>
+                            `;
+                          }).join('')}
+                        </div>
+                        ${Object.keys(state.studentDragSelections).length > 0 ? `<button onclick="handleClearBlanks()" class="text-xs text-rose-500 font-bold block mx-auto mt-2">🔄 清除重填</button>` : ''}
+                      </div>
+
+                      <button onclick="submitDragAnswer()" ${state.isSubmitting ? 'disabled' : ''} class="w-full bg-emerald-600 hover:bg-emerald-700 active:scale-98 text-white font-bold py-4 rounded-2xl text-lg shadow-md transition flex items-center justify-center gap-2 ${state.isSubmitting ? 'opacity-50 cursor-not-allowed' : ''}">
+                        ${state.isSubmitting ? '⏳ 傳送中...' : '📤 提交答案到老師螢幕'}
+                      </button>
+                    </div>
+                  ` : ''}
+
+                  ${q.type === 'mc' ? `
+                    <div class="space-y-6">
+                      ${displayImgUrl ? `<div class="text-center"><img src="${displayImgUrl}" class="max-h-64 object-contain rounded-2xl mx-auto border border-slate-200" /></div>` : ''}
+                      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        ${q.options?.map((opt, oIdx) => {
+                          const lbls = ['A', 'B', 'C', 'D'];
+                          const isSel = state.studentMcChoice === oIdx;
+                          return `
+                            <button onclick="state.studentMcChoice=${oIdx}; safeRender();" class="p-4 rounded-2xl border-2 text-left font-bold transition flex items-center gap-3 ${isSel ? 'bg-indigo-600 text-white border-indigo-600 shadow-md' : 'bg-slate-50 text-slate-800 border-slate-200 hover:border-indigo-300'}">
+                              <span class="w-8 h-8 rounded-xl flex items-center justify-center font-black text-sm ${isSel ? 'bg-white text-indigo-600' : 'bg-indigo-100 text-indigo-700'}">${lbls[oIdx]}</span>
+                              <span class="text-base">${opt}</span>
+                            </button>
+                          `;
+                        }).join('')}
+                      </div>
+                      <button onclick="submitMcAnswer()" ${state.isSubmitting ? 'disabled' : ''} class="w-full bg-emerald-600 hover:bg-emerald-700 active:scale-98 text-white font-bold py-4 rounded-2xl text-lg shadow-md transition flex items-center justify-center gap-2 ${state.isSubmitting ? 'opacity-50 cursor-not-allowed' : ''}">
+                        ${state.isSubmitting ? '⏳ 傳送中...' : '📤 提交答案到老師螢幕'}
+                      </button>
+                    </div>
+                  ` : ''}
+
+                  ${q.type === 'numeric' ? `
+                    <div class="space-y-6 max-w-sm mx-auto text-center">
+                      ${displayImgUrl ? `<div class="text-center"><img src="${displayImgUrl}" class="max-h-56 object-contain rounded-2xl mx-auto border border-slate-200" /></div>` : ''}
+                      <div class="text-4xl font-black text-indigo-600 bg-indigo-50 py-6 rounded-2xl border border-indigo-100">
+                        ${state.studentNumericInput || '___'} <span class="text-xl text-slate-500 font-bold">${q.unit || ''}</span>
+                      </div>
+                      <div class="grid grid-cols-3 gap-2">
+                        ${['1','2','3','4','5','6','7','8','9','C','0','⌫'].map(btn => `
+                          <button onclick="handleNumericKey('${btn}')" class="p-4 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-xl text-xl font-bold active:scale-95">${btn}</button>
+                        `).join('')}
+                      </div>
+                      <button onclick="submitNumericAnswer()" ${state.isSubmitting ? 'disabled' : ''} class="w-full bg-emerald-600 hover:bg-emerald-700 active:scale-98 text-white font-bold py-4 rounded-2xl text-lg shadow-md transition flex items-center justify-center gap-2 ${state.isSubmitting ? 'opacity-50 cursor-not-allowed' : ''}">
+                        ${state.isSubmitting ? '⏳ 傳送中...' : '📤 提交答案到老師螢幕'}
+                      </button>
+                    </div>
+                  ` : ''}
+
+                  ${q.type === 'discussion' ? `
+                    <div class="space-y-6 text-center">
+                      ${displayImgUrl ? `<div class="text-center"><img src="${displayImgUrl}" class="max-h-72 object-contain rounded-2xl mx-auto border border-slate-200" /></div>` : ''}
+                      <div class="bg-cyan-50 border-2 border-cyan-200 p-6 rounded-3xl text-cyan-900 space-y-2">
+                        <div class="text-3xl mb-2">💬</div>
+                        <h3 class="text-lg font-black">本題為課堂討論題</h3>
+                        <p class="text-xs font-semibold text-slate-600">請仔細思考題目並與同學展開口頭討論，無須線上提交答案。</p>
+                      </div>
+                    </div>
+                  ` : ''}
+
+                  ${state.showAnswer ? `
+                    <div class="bg-amber-500/10 border-2 border-amber-400 p-5 rounded-2xl text-slate-800 space-y-2">
+                      <h4 class="font-bold text-amber-800">🏆 老師公布觀念重點與解答指引：</h4>
+                      <p class="text-sm font-semibold">${q.explanation || '參照課堂說明'}</p>
+                    </div>
+                  ` : ''}
+                </div>
+              ` : `
+                <div class="bg-white p-12 rounded-3xl text-center space-y-3 border border-slate-200 shadow-sm">
+                  <div class="text-4xl animate-bounce">⏳</div>
+                  <h3 class="text-lg font-bold text-slate-800">已進入答題準備區</h3>
+                  <p class="text-xs text-slate-500">請等待老師在課堂發布題目...</p>
+                </div>
+              `}
+            </div>
+          `;
+        }
+        html += `</div>`;
+      }
+
+      appEl.innerHTML = html;
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+      initCloudSync();
+      safeRender();
+    });
+
+    if (document.readyState === 'interactive' || document.readyState === 'complete') {
+      initCloudSync();
+      safeRender();
+    }
+  </script>
+</body>
+</html>
